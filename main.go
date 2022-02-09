@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,6 +57,23 @@ type queueMetrics struct {
 	consumers, msgTotal, msgReady, msgUnack int
 }
 
+type healthStatus struct {
+	sync.Mutex
+	healthy bool
+}
+
+func (h *healthStatus) isHealthy() bool {
+	h.Lock()
+	defer h.Unlock()
+	return h.healthy
+}
+
+func (h *healthStatus) setHealthy(hl bool) {
+	h.Lock()
+	defer h.Unlock()
+	h.healthy = hl
+}
+
 func main() {
 	flag.Parse()
 	if nil == metricsPath || !strings.HasSuffix(*metricsPath, "/") {
@@ -77,15 +95,25 @@ func main() {
 		panic(err)
 	}
 
+	healthStatus := &healthStatus{
+		healthy: true,
+	}
+
 	go func() {
 		for {
 			out, err := execRabbitmqctlListQueues()
 			if err != nil {
-				// todo health
+				log.Printf("failed exec rabbitmqctl command: %s\n", err.Error())
+				healthStatus.setHealthy(false)
+				time.Sleep(time.Duration(*refreshSecs) * time.Second)
+				continue
 			}
 			metrics, err := parseRabbitmqctlOutput(out)
 			if err != nil {
-				// todo health
+				log.Printf("failed parse rabbitmqctl output: %s\n%s", err.Error(), string(out))
+				healthStatus.setHealthy(false)
+				time.Sleep(time.Duration(*refreshSecs) * time.Second)
+				continue
 			}
 
 			for _, m := range metrics {
@@ -95,6 +123,7 @@ func main() {
 				messagesUnacknowledged.WithLabelValues(m.name).Set(float64(m.msgUnack))
 			}
 
+			healthStatus.setHealthy(true)
 			time.Sleep(time.Duration(*refreshSecs) * time.Second)
 		}
 	}()
@@ -103,6 +132,16 @@ func main() {
 	r.MustRegister(consumers, messagesTotal, messagesReady, messagesUnacknowledged)
 	handler := promhttp.HandlerFor(r, promhttp.HandlerOpts{})
 	http.Handle(*metricsPath, handler)
+	http.Handle("/health", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healthStatus.Lock()
+		defer healthStatus.Unlock()
+
+		s := http.StatusOK
+		if !healthStatus.healthy {
+			s = http.StatusInternalServerError
+		}
+		w.WriteHeader(s)
+	}))
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
 
