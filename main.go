@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -87,6 +88,24 @@ func main() {
 	}
 	if nil == refreshSecs || *refreshSecs < 5 {
 		panic("refresh interval must be specified and be greater or equal then 5")
+	}
+
+	// health check for Docker
+	if len(os.Args) == 2 && os.Args[1] == "health-check" {
+		req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/health", *port), nil)
+		if err != nil {
+			log.Printf("failed create HTTP health request: %s\n", err.Error())
+			os.Exit(1)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("failed do HTTP health request: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if resp.StatusCode == http.StatusInternalServerError {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	// test if rabbitmqctl is available
